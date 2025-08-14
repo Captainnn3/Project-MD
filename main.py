@@ -151,3 +151,4 @@ if __name__ == "__main__":
     import uvicorn
     # tip: workers=1 สำหรับ dev streaming จะง่ายที่สุด
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+#1234sdfdsfwegregertertkoertoekt
