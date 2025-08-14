@@ -1,29 +1,37 @@
-import React, { useEffect, useRef, useState } from "react";
-import logo from '/public/logo.jpg';
-const API_URL = "http://localhost:8000/chat";
+import React, { useEffect, useRef, useState, useMemo } from "react";
+
+
+const API_URL = "http://localhost:8000/chat-stream"; // ⬅️ เปลี่ยนเป็น endpoint แบบสตรีม
 
 export default function Chat() {
-  // ---- Theme tokens ----
   const GOLD_GRAD = "linear-gradient(45deg, #FFD600, #FFC107)";
   const DARK_BG = "linear-gradient(to bottom, #111, #1a1a1a)";
 
-  // ---- State ----
-  const initialMessages = [
-    { sender: "bot", text: "สวัสดีค่ะ! มีอะไรให้ช่วยถามเกี่ยวกับสินค้าไหมคะ?" }
-  ];
+  const initialMessages = useMemo(
+    () => [{ sender: "bot", text: "สวัสดีค่ะ! มีอะไรให้ช่วยถามเกี่ยวกับสินค้าไหมคะ?" }],
+    []
+  );
+
   const [chats, setChats] = useState([{ id: 1, name: "แชท #1", messages: initialMessages }]);
   const [currentChatId, setCurrentChatId] = useState(1);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const endRef = useRef(null);
 
+  // เก็บ AbortController ของคำขอล่าสุด ไว้ยกเลิกถ้าผู้ใช้สลับแชท/ออกหน้า
+  const inflightController = useRef(null);
+
   const currentChat = chats.find(c => c.id === currentChatId);
   const short = (s, n = 28) => (s.length > n ? s.slice(0, n) + "…" : s);
 
-  // ---- Effects ----
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [currentChat?.messages, loading]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [currentChat?.messages, loading]);
 
-  // ---- Actions ----
+  useEffect(() => {
+    return () => inflightController.current?.abort(); // cleanup ตอน unmount
+  }, []);
+
   const handleNewChat = () => {
     const newId = chats.length ? Math.max(...chats.map(c => c.id)) + 1 : 1;
     setChats([...chats, { id: newId, name: `แชท #${newId}`, messages: initialMessages }]);
@@ -34,57 +42,98 @@ export default function Chat() {
   const handleSelectChat = (id) => {
     setCurrentChatId(id);
     setInput("");
+    inflightController.current?.abort(); // ถ้ากำลังสตรีมอยู่ ให้ยกเลิกเพื่อไม่ให้ปนกัน
   };
 
+  // ⬇️ เวอร์ชันสตรีม: อ่านทีละ chunk แล้วเติมลงข้อความบอททันที
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || loading) return;
 
     setLoading(true);
 
-    // optimistic: push user message + auto-rename if first user message
-    setChats(prev =>
-      prev.map(c => {
-        if (c.id !== currentChatId) return c;
-        const next = { ...c, messages: [...c.messages, { sender: "user", text }] };
-        const userCount = next.messages.filter(m => m.sender === "user").length;
-        if (c.name.startsWith("แชท #") && userCount === 1) next.name = short(text);
-        return next;
-      })
-    );
+    // 1) ใส่ข้อความผู้ใช้ + สร้างบัฟเฟอร์ว่างสำหรับบอท
+    let localChatId = currentChatId;
+    let historySnapshot;
+
+    setChats(prev => {
+      return prev.map(c => {
+        if (c.id !== localChatId) return c;
+        const nextMsgs = [...c.messages, { sender: "user", text }, { sender: "bot", text: "" }];
+        // เปลี่ยนชื่อแท็บจากแชท # เป็นชื่อสั้นข้อความแรกของผู้ใช้
+        const userCount = nextMsgs.filter(m => m.sender === "user").length;
+        const newName = (c.name.startsWith("แชท #") && userCount === 1) ? short(text) : c.name;
+        historySnapshot = nextMsgs.slice(0, nextMsgs.length - 1); // ไม่รวมบอทว่างตัวล่าสุด
+        return { ...c, name: newName, messages: nextMsgs };
+      });
+    });
+
     setInput("");
 
+    // 2) สร้างคำขอสตรีม
+    const controller = new AbortController();
+    inflightController.current = controller;
+
     try {
-      const history = (currentChat?.messages ?? []).concat({ sender: "user", text });
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text, history })
+        body: JSON.stringify({ question: text, history: historySnapshot }),
+        signal: controller.signal
       });
-      const data = await res.json();
-      const botText = data?.response ?? "(no response)";
 
-      setChats(prev =>
-        prev.map(c =>
-          c.id === currentChatId
-            ? { ...c, messages: [...c.messages, { sender: "bot", text: botText }] }
-            : c
-        )
-      );
-    } catch {
-      setChats(prev =>
-        prev.map(c =>
-          c.id === currentChatId
-            ? { ...c, messages: [...c.messages, { sender: "bot", text: "ขออภัย ระบบขัดข้อง ลองใหม่อีกครั้งนะคะ" }] }
-            : c
-        )
-      );
+      if (!res.ok || !res.body) {
+        throw new Error("Bad response");
+      }
+
+      // 3) อ่านสตรีมทีละ chunk แล้วเติมลง “ข้อความบอทตัวสุดท้าย” ของห้องแชทนี้
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let done = false;
+
+      while (!done) {
+        const { value, done: d } = await reader.read();
+        done = d;
+        if (value) {
+          const chunk = decoder.decode(value, { stream: true });
+
+          setChats(prev =>
+            prev.map(c => {
+              if (c.id !== localChatId) return c;
+              const msgs = c.messages.slice();
+              // สมมติข้อความสุดท้ายเป็นของบอท (เราพุชไว้แล้ว)
+              const last = msgs[msgs.length - 1];
+              if (last?.sender === "bot") {
+                // เติมข้อความ (ตัวอักษร/ชิ้น) ที่เพิ่งได้รับ
+                msgs[msgs.length - 1] = { ...last, text: last.text + chunk };
+              }
+              return { ...c, messages: msgs };
+            })
+          );
+        }
+      }
+    } catch (e) {
+      // กรณียกเลิกไม่ต้องแสดง error
+      if (e.name !== "AbortError") {
+        setChats(prev =>
+          prev.map(c => {
+            if (c.id !== localChatId) return c;
+            const msgs = c.messages.slice();
+            // ถ้าบับเบิลบอทยังว่าง ให้แทนด้วยข้อความผิดพลาด
+            const last = msgs[msgs.length - 1];
+            if (last?.sender === "bot" && last.text === "") {
+              msgs[msgs.length - 1] = { ...last, text: "ขออภัย ระบบขัดข้อง ลองใหม่อีกครั้งนะคะ" };
+            }
+            return { ...c, messages: msgs };
+          })
+        );
+      }
     } finally {
       setLoading(false);
+      inflightController.current = null;
     }
   };
 
-  // ---- Render ----
   return (
     <div className="root" style={{ background: DARK_BG }}>
       <style>{css}</style>
@@ -112,9 +161,8 @@ export default function Chat() {
           })}
         </div>
 
-        {/* Footer Logo (fixed at bottom-left of sidebar) */}
         <div className="sidebar-footer">
-          <img src="/public/Logo.jpg" alt="Logo" className="footer-logo" />
+          <img src="/Logo.jpg" alt="Logo" className="footer-logo" />
         </div>
       </aside>
 
@@ -126,7 +174,7 @@ export default function Chat() {
               <span className={`bubble ${m.sender === "user" ? "gold" : "bot"}`}>{m.text}</span>
             </div>
           ))}
-          {loading && <div className="loading">กำลังค้นหาข้อมูล…</div>}
+          {loading && <div className="loading">กำลังพิมพ์…</div>}
           <div ref={endRef} />
         </section>
 
