@@ -1,11 +1,95 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 
+/** ===== Endpoints: ใช้สตรีมก่อน ถ้าไม่ได้ค่อย fallback ไป /chat ===== */
+const BASE = "http://localhost:8000";
+const API_STREAM = `${BASE}/chat-stream`;  // แบบสตรีม
+const API_ONESHOT = `${BASE}/chat`;        // แบบตอบครั้งเดียว (fallback)
 
-const API_URL = "http://localhost:8000/chat-stream"; // ⬅️ เปลี่ยนเป็น endpoint แบบสตรีม
+/* ====== Rich renderer: **bold**, **หัวข้อ**:, bullet -, ลำดับเลข 1., ย่อหน้า ====== */
+function renderRich(src = "") {
+  const esc = (s) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // 1) escape ก่อน
+  let s = esc(src);
+
+  // 2) **bold**
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  // 3) แยกเป็นบรรทัดและรวมลิสต์ให้เป็นก้อนเดียว
+  const lines = s.split(/\r?\n/);
+  const chunks = []; // เก็บเป็นสลับระหว่าง <ul>/<ol>/string
+  let list = null;   // {type:'ul'|'ol', items:[]}
+
+  const flushList = () => {
+    if (!list) return;
+    const tag = list.type === "ul" ? "ul" : "ol";
+    chunks.push(`<${tag}>${list.items.map(x => `<li>${x}</li>`).join("")}</${tag}>`);
+    list = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/g, "");
+
+    if (/^\s*$/.test(line)) {
+      if (!list) chunks.push("\n");
+      continue;
+    }
+
+    // bullet: - ...
+    const mUl = line.match(/^\s*[-•]\s+(.*)$/);
+    if (mUl) {
+      if (!list || list.type !== "ul") list = { type: "ul", items: [] };
+      list.items.push(mUl[1]);
+      continue;
+    }
+
+    // ordered: 1. ... หรือ 1) ...
+    const mOl = line.match(/^\s*(\d+)[\.\)]\s+(.*)$/);
+    if (mOl) {
+      if (!list || list.type !== "ol") list = { type: "ol", items: [] };
+      list.items.push(mOl[2]);
+      continue;
+    }
+
+    // ไม่ใช่ลิสต์ → ปิดลิสต์ก่อน แล้วเก็บเป็นข้อความปกติ
+    flushList();
+    chunks.push(line);
+  }
+  flushList();
+
+  // 4) รวมข้อความธรรมดาเป็น <p> และแปลง **หัวข้อ**: เป็น <h4>
+  const htmlParts = [];
+  let buf = [];
+
+  const pushParagraph = () => {
+    if (!buf.length) return;
+    const block = buf.join("\n");
+    const mHead = block.match(/^\s*<strong>(.+?)<\/strong>\s*:\s*$/); // **หัวข้อ**:
+    if (mHead) {
+      htmlParts.push(`<h4>${mHead[1]}</h4>`);
+    } else {
+      htmlParts.push(`<p>${block.replace(/\n/g, "<br/>")}</p>`);
+    }
+    buf = [];
+  };
+
+  for (const ch of chunks) {
+    if (typeof ch === "string" && ch !== "\n" && !/^<\/*(ul|ol)/.test(ch)) {
+      buf.push(ch);
+    } else {
+      pushParagraph();
+      if (typeof ch === "string" && /^<\/*(ul|ol)/.test(ch)) htmlParts.push(ch);
+    }
+  }
+  pushParagraph();
+
+  return htmlParts.join("");
+}
 
 export default function Chat() {
   const GOLD_GRAD = "linear-gradient(45deg, #FFD600, #FFC107)";
-  const DARK_BG = "linear-gradient(to bottom, #111, #1a1a1a)";
+  const DARK_BG  = "linear-gradient(to bottom, #111, #1a1a1a)";
 
   const initialMessages = useMemo(
     () => [{ sender: "bot", text: "สวัสดีค่ะ! มีอะไรให้ช่วยถามเกี่ยวกับสินค้าไหมคะ?" }],
@@ -45,7 +129,7 @@ export default function Chat() {
     inflightController.current?.abort(); // ถ้ากำลังสตรีมอยู่ ให้ยกเลิกเพื่อไม่ให้ปนกัน
   };
 
-  // ⬇️ เวอร์ชันสตรีม: อ่านทีละ chunk แล้วเติมลงข้อความบอททันที
+  /** อ่านสตรีมทีละ chunk ถ้าไม่สำเร็จ → fallback ไป oneshot */
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -56,37 +140,49 @@ export default function Chat() {
     let localChatId = currentChatId;
     let historySnapshot;
 
-    setChats(prev => {
-      return prev.map(c => {
+    setChats(prev =>
+      prev.map(c => {
         if (c.id !== localChatId) return c;
         const nextMsgs = [...c.messages, { sender: "user", text }, { sender: "bot", text: "" }];
-        // เปลี่ยนชื่อแท็บจากแชท # เป็นชื่อสั้นข้อความแรกของผู้ใช้
         const userCount = nextMsgs.filter(m => m.sender === "user").length;
         const newName = (c.name.startsWith("แชท #") && userCount === 1) ? short(text) : c.name;
-        historySnapshot = nextMsgs.slice(0, nextMsgs.length - 1); // ไม่รวมบอทว่างตัวล่าสุด
+        historySnapshot = nextMsgs.slice(0, nextMsgs.length - 1); // ไม่รวมบอทว่าง
         return { ...c, name: newName, messages: nextMsgs };
-      });
-    });
+      })
+    );
 
     setInput("");
 
-    // 2) สร้างคำขอสตรีม
     const controller = new AbortController();
     inflightController.current = controller;
 
+    // helper: เติมข้อความให้บับเบิลบอทตัวสุดท้าย
+    const appendToLastBot = (chunk) => {
+      setChats(prev =>
+        prev.map(c => {
+          if (c.id !== localChatId) return c;
+          const msgs = c.messages.slice();
+          const last = msgs[msgs.length - 1];
+          if (last?.sender === "bot") {
+            msgs[msgs.length - 1] = { ...last, text: last.text + chunk };
+          }
+          return { ...c, messages: msgs };
+        })
+      );
+    };
+
+    // ---------- 1) พยายามสตรีมจาก /chat-stream ----------
     try {
-      const res = await fetch(API_URL, {
+      const res = await fetch(API_STREAM, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: text, history: historySnapshot }),
         signal: controller.signal
       });
 
-      if (!res.ok || !res.body) {
-        throw new Error("Bad response");
-      }
+      // ถ้าไม่มี endpoint หรือสตรีมใช้ไม่ได้ → โยน error เพื่อไป fallback
+      if (!res.ok || !res.body) throw new Error(`STREAM_UNAVAILABLE_${res.status}`);
 
-      // 3) อ่านสตรีมทีละ chunk แล้วเติมลง “ข้อความบอทตัวสุดท้าย” ของห้องแชทนี้
       const reader = res.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let done = false;
@@ -96,37 +192,34 @@ export default function Chat() {
         done = d;
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
-
+          appendToLastBot(chunk);
+        }
+      }
+    } catch (e) {
+      // ---------- 2) Fallback ไป /chat แบบครั้งเดียว ----------
+      if (e.name !== "AbortError") {
+        try {
+          const res2 = await fetch(API_ONESHOT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: text, history: historySnapshot })
+          });
+          const data = await res2.json();
+          appendToLastBot(data?.response ?? "…");
+        } catch {
+          // ถ้ายังพัง แสดงข้อความผิดพลาด
           setChats(prev =>
             prev.map(c => {
               if (c.id !== localChatId) return c;
               const msgs = c.messages.slice();
-              // สมมติข้อความสุดท้ายเป็นของบอท (เราพุชไว้แล้ว)
               const last = msgs[msgs.length - 1];
-              if (last?.sender === "bot") {
-                // เติมข้อความ (ตัวอักษร/ชิ้น) ที่เพิ่งได้รับ
-                msgs[msgs.length - 1] = { ...last, text: last.text + chunk };
+              if (last?.sender === "bot" && last.text === "") {
+                msgs[msgs.length - 1] = { ...last, text: "ขออภัย ระบบขัดข้อง ลองใหม่อีกครั้งนะคะ" };
               }
               return { ...c, messages: msgs };
             })
           );
         }
-      }
-    } catch (e) {
-      // กรณียกเลิกไม่ต้องแสดง error
-      if (e.name !== "AbortError") {
-        setChats(prev =>
-          prev.map(c => {
-            if (c.id !== localChatId) return c;
-            const msgs = c.messages.slice();
-            // ถ้าบับเบิลบอทยังว่าง ให้แทนด้วยข้อความผิดพลาด
-            const last = msgs[msgs.length - 1];
-            if (last?.sender === "bot" && last.text === "") {
-              msgs[msgs.length - 1] = { ...last, text: "ขออภัย ระบบขัดข้อง ลองใหม่อีกครั้งนะคะ" };
-            }
-            return { ...c, messages: msgs };
-          })
-        );
       }
     } finally {
       setLoading(false);
@@ -171,7 +264,14 @@ export default function Chat() {
         <section className="messages" aria-live="polite">
           {currentChat?.messages.map((m, i) => (
             <div key={i} className={`msg ${m.sender}`}>
-              <span className={`bubble ${m.sender === "user" ? "gold" : "bot"}`}>{m.text}</span>
+              {m.sender === "user" ? (
+                <span className="bubble gold">{m.text}</span>
+              ) : (
+                <span
+                  className="bubble bot rich"
+                  dangerouslySetInnerHTML={{ __html: renderRich(m.text) }}
+                />
+              )}
             </div>
           ))}
           {loading && <div className="loading">กำลังพิมพ์…</div>}
@@ -196,7 +296,7 @@ export default function Chat() {
   );
 }
 
-/* ---------- CSS: Fullscreen + Gold/Black gradient theme + interactions + footer logo ---------- */
+/* ---------- CSS: Gold/Black + bubble-fit + เน้นหัวข้อสำคัญ ---------- */
 const css = `
 :root{
   --gold-1:#FFD600;
@@ -254,11 +354,7 @@ body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, In
   box-shadow:0 0 12px rgba(255,214,0,.25);
   transition: transform .2s ease, box-shadow .2s ease, filter .2s ease;
 }
-.footer-logo:hover{
-  transform:scale(1.05);
-  box-shadow:0 0 18px rgba(255,214,0,.6);
-  filter:saturate(1.1);
-}
+.footer-logo:hover{ transform:scale(1.05); box-shadow:0 0 18px rgba(255,214,0,.6); filter:saturate(1.1); }
 
 /* Main */
 .main{ flex:1; height:100%; display:flex; flex-direction:column; padding:20px; gap:14px; }
@@ -270,20 +366,69 @@ body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, In
   box-shadow: 0 8px 24px rgba(0,0,0,.25);
 }
 
-.msg{ display:flex; margin:10px 0; }
-.msg.user{ justify-content:flex-end; }
+/* แถวของข้อความ */
+.msg{ display:flex; margin:10px 0; align-items:flex-end; }
+.msg.user{ justify-content:flex-end; }   /* ผู้ใช้ชิดขวา */
+.msg.bot{  justify-content:flex-start; } /* บอทชิดซ้าย */
 
+/* บับเบิล */
 .bubble{
-  max-width:72%; padding:12px 16px; border-radius:16px; line-height:1.45; font-size:15px;
-  box-shadow: 0 4px 12px rgba(0,0,0,.25);
+  display:inline-block;
+  max-width: min(680px, 72%);
+  padding:8px 14px;
+  margin:4px 0;
+  border-radius:16px;
+  line-height:1.5;
+  font-size:15px;
+  box-shadow:0 4px 12px rgba(0,0,0,.25);
+  word-break:break-word;
+  overflow-wrap:anywhere;
+  white-space:pre-wrap;
   transition: transform .12s ease, box-shadow .2s ease;
 }
 .bubble:hover{ transform:translateY(-1px); box-shadow:0 6px 16px rgba(0,0,0,.32); }
 
 .bubble.gold{ background:var(--gold-grad); color:#111; border:none; }
-.bubble.bot{ background:var(--bot); color:#f4f4f4; border:1px solid rgba(255,214,0,.25); }
+.bubble.bot{  background:var(--bot); color:#f4f4f4; border:1px solid rgba(255,214,0,.25); }
 
 .loading{ color:var(--gold-1); font-size:13px; margin-top:6px; }
+
+/* ===== อ่านง่าย + เน้นหัวข้อสำคัญสำหรับบอท ===== */
+.bubble.rich{
+  background:var(--bot);
+  border:1px solid rgba(255,214,0,.25);
+  max-width:min(720px, 90%);
+  line-height:1.85;
+  font-size:16px;
+  white-space:normal;
+  text-align:left;
+}
+.bubble.rich p{ margin:0 0 12px; }
+.bubble.rich h4{
+  margin:14px 0 8px;
+  font-size:18px;
+  font-weight:900;
+  color:#ffe071;
+  display:inline-block;
+  position:relative;
+  padding-bottom:2px;
+}
+.bubble.rich h4::after{
+  content:"";
+  position:absolute;
+  left:0; right:0; bottom:-2px;
+  height:2px;
+  background:linear-gradient(90deg, var(--gold-1), transparent 70%);
+  opacity:.9;
+}
+.bubble.rich ul, .bubble.rich ol{
+  margin:8px 0 12px 1.25em;
+  padding:0;
+}
+.bubble.rich ul{ list-style:disc; }
+.bubble.rich ol{ list-style:decimal; }
+.bubble.rich li{ margin:6px 0; }
+.bubble.rich strong{ font-weight:800; color:#ffe071; }
 
 /* Composer */
 .composer{
@@ -296,6 +441,13 @@ body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, In
 }
 .input::placeholder{ color:#9a9a9a; }
 .input:focus{ outline:none; border-color:var(--gold-1); box-shadow:0 0 0 3px rgba(255,214,0,.25); background:#101010; }
+
+/* ปรับสำหรับหน้าจอเล็ก */
+@media (max-width: 640px){
+  .messages{ padding:16px; }
+  .bubble{ max-width: calc(100% - 56px); }
+  .bubble.rich{ max-width: calc(100% - 56px); }
+}
 
 /* Buttons */
 .btn{ border:none; border-radius:10px; padding:10px 16px; font-weight:800; cursor:pointer;
