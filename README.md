@@ -1,6 +1,6 @@
 # Chat-AI (React + FastAPI)
 
-แชทบอทถาม-ตอบข้อมูลสินค้า (RAG) จากไฟล์ CSV ด้วย AI (OpenAI)
+แชทถาม-ตอบ
 
 ---
 
