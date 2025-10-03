@@ -92,7 +92,7 @@ export default function Chat() {
   const DARK_BG  = "linear-gradient(to bottom, #111, #1a1a1a)";
 
   const initialMessages = useMemo(
-    () => [{ sender: "bot", text: "สวัสดีค่ะ! มีอะไรให้ช่วยถามเกี่ยวกับสินค้าไหมคะ?" }],
+    () => [{ sender: "bot", text: "สวัสดีครับ สนใจสอบถามเกี่ยวกับ MindDoJo ไหมครับ?" }],
     []
   );
 
