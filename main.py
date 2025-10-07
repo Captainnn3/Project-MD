@@ -1,5 +1,7 @@
 # main.py — FastAPI + LangChain (MindDoJo AI Agent สำหรับฝ่ายขาย)
 import os, asyncio, uuid
+
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,7 +39,7 @@ else:
     documents = []
 
     # รวมข้อมูลคอร์ส + วิทยากร
-    for course in courses:
+    for course in courses: 
         facilitator_ids = course.get("facilitators_ids", [])
         facs = list(facilitators_collection.find({"_id": {"$in": facilitator_ids}}))
 
@@ -190,13 +192,15 @@ async def chat_stream(req: ChatRequest):
                 content=(
                     f"ประวัติการสนทนา:\n{history_text}\n\n"
                     f"ข้อมูลจากฐานข้อมูล:\n{ctx}\n\n"
-                    f"คำถาม:\n{q}\n\nคำตอบ:"
+                    f"คำถาม:\n{q}\n\nคำตอบ:"  # note
                 )
             )
         ]
         handler = AsyncIteratorCallbackHandler()
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, streaming=True)
-        task = asyncio.create_task(llm.ainvoke(prompt, config={"callbacks": [handler]}))
+        task = asyncio.create_task(
+            llm.ainvoke(prompt, config={"callbacks": [handler]})
+        )
 
         final_answer = ""
         async for token in handler.aiter():
@@ -207,12 +211,14 @@ async def chat_stream(req: ChatRequest):
         # --- เก็บ history ลง MongoDB ---
         chat_collection.update_one(
             {"session_id": req.session_id},
-            {"$push": {"messages": {"sender": "user", "text": q}}},
-            upsert=True
-        )
-        chat_collection.update_one(
-            {"session_id": req.session_id},
-            {"$push": {"messages": {"sender": "ai", "text": final_answer}}},
+            {"$push": {
+                "messages": {
+                    "$each": [
+                        {"sender": "user", "text": q,"timestamp": datetime.utcnow()},
+                        {"sender": "ai", "text": final_answer,"timestamp": datetime.utcnow()}
+                    ]
+                }
+             }},
             upsert=True
         )
 
