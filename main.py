@@ -1,154 +1,256 @@
-# main.py  — FastAPI + LangChain (stream จริง + เร็วขึ้น)
-import os, re, asyncio
+# ...existing code...
+import os, asyncio, uuid, re
+from datetime import datetime
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pymongo import MongoClient
 
-from langchain_community.document_loaders import CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.agents import initialize_agent, AgentType, tool
 from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
+from langchain.schema import Document, HumanMessage, SystemMessage
+from langchain.memory import ConversationBufferMemory
 
+# -------------------- Load ENV --------------------
 load_dotenv()
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MINDDOJO_INDEX = "minddojo_courses.index"
 
-# -------------------- Load data ONE-TIME --------------------
-INDEX_DIR = "products.index"
+# -------------------- Connect MongoDB --------------------
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["minddojo"]
+courses_collection = db["courses"]
+chat_collection = db["chat_sessions"]
+
+# -------------------- Build / Load Retriever --------------------
+
 EMB = OpenAIEmbeddings()
 
-if os.path.exists(INDEX_DIR):
-    retriever = FAISS.load_local(
-        INDEX_DIR, EMB, allow_dangerous_deserialization=True
+if os.path.exists(MINDDOJO_INDEX):
+    retriever_minddojo = FAISS.load_local(
+        MINDDOJO_INDEX, EMB, allow_dangerous_deserialization=True
     ).as_retriever()
 else:
-    loader = CSVLoader(file_path="products-100.csv", encoding="utf-8")
-    docs = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50) \
-           .split_documents(loader.load())
-    faiss_store = FAISS.from_documents(docs, EMB)
-    faiss_store.save_local(INDEX_DIR)
-    retriever = faiss_store.as_retriever()
+    courses = list(courses_collection.find({}))
+    documents = []
 
-# -------------------- Fast tools (no LLM, ตอบไว) --------------------
-# คอมไพล์ regex ล่วงหน้าให้เร็วขึ้น
-PRICE_PAT = re.compile(r"([\w\s]+?)\s*(?:มีราคา|ราคาเท่าไหร่|ราคา|คืออะไร)")
-LIST_PAT  = re.compile(r"(?:สินค้า)?\s*([\w\s]+?)\s*มีอะไรบ้าง|([\w\s]+?)\s*อะไรบ้าง")
+    # รวมข้อมูลคอร์ส + วิทยากร
+    for course in courses:
+        fac_names = course.get("facilitators", [])
+        fac_display = ", ".join(fac_names) if fac_names else "None"
+        text = (
+            f"[COURSE DATA]\n"
+            f"Course Title (EN): {course.get('title','')}\n"
+            f"Description (TH): {course.get('description','')}\n"
+            f"Objectives (TH): {'; '.join(course.get('objectives', []))}\n"
+            f"Duration: {course.get('duration','')}\n"
+            f"Price: {course.get('price','')}\n"
+            f"Facilitators: {', '.join(fac_names)}\n"
+        )
+        documents.append(Document(page_content=text, metadata={"type": "course", "id": str(course["_id"])}))
 
-def price_products_fast(q: str) -> str | None:
-    m = PRICE_PAT.search(q)
-    keyword = (m.group(1) if m else "").strip()
-    if not keyword:  # ไม่ใช่โจทย์ถามราคา → ไม่จับทางลัดนี้
-        return None
-    hits = retriever.invoke(q)
-    out = []
-    for d in hits:
-        if keyword.lower() in d.page_content.lower():
-            price = re.search(r"Price:\s*(\d+)", d.page_content)
-            curr  = re.search(r"Currency:\s*(\w+)", d.page_content)
-            name  = re.search(r"Name:\s*([^,\n]+)", d.page_content)
-            if price and curr and name:
-                out.append(f"{name.group(1)} มีราคา {price.group(1)} {curr.group(1)}")
-    return "\n".join(out) if out else "ไม่พบข้อมูลที่เกี่ยวข้อง"
+    # สร้าง FAISS
+    faiss_store = FAISS.from_documents(documents, EMB)
+    faiss_store.save_local(MINDDOJO_INDEX)
+    retriever_minddojo = faiss_store.as_retriever(search_type="similarity", search_kwargs={"k":4})
 
-def list_products_fast(q: str) -> str | None:
-    m = LIST_PAT.search(q)
-    if not m:
-        return None
-    keyword = (m.group(1) or m.group(2) or "").strip()
-    if not keyword:
-        return None
-    docs = retriever.invoke(q)
-    results = []
-    for doc in docs:
-        if keyword.lower() in doc.page_content.lower():
-            m_name = re.search(r"Name:\s*([^,\n]+)", doc.page_content)
-            if m_name:
-                results.append(m_name.group(1))
-    return ("พบสินค้า: " + ", ".join(dict.fromkeys(results))) if results else "ไม่พบข้อมูลที่เกี่ยวข้อง"
+@tool
+def recommend_courses(q: str) -> str:
+    """แนะนำหลักสูตรตามสถานการณ์ เช่น ปัญหาในองค์กร"""
+    if re.search(r"(ทะเลาะ|ขัดแย้ง|ทำงานไม่เป็นทีม|บรรยากาศไม่ดี|ปัญหาในองค์กร)", q):
+        return (
+            "จากประสบการณ์ของ MindDoJo แนะนำหลักสูตร:\n"
+            "- **Psychological Safety in Action** → เพื่อสร้างบรรยากาศทีมที่ปลอดภัยในการแสดงความคิดเห็น ลดความขัดแย้งภายในองค์กร\n"
+            "- **Effective Communication** → เพื่อพัฒนาทักษะการฟังและสื่อสารเชิงบวก สร้างความเข้าใจและความร่วมมือในทีม"
+        )
+    
+    elif re.search(r"(ผู้นำ|ภาวะผู้นำ)", q):
+        return (
+            "จากประสบการณ์ของ MindDoJo แนะนำหลักสูตร:\n"
+            "- **Leadership Mindset** → เพื่อเสริมภาวะผู้นำและการบริหารทีมอย่างมีประสิทธิภาพ\n"
+            "- **Psychological Safety in Action** → เพื่อสร้างความไว้วางใจและบรรยากาศที่เอื้อต่อการนำทีม"
+        )
+    
+    elif re.search(r"(นวัตกรรม|ไอเดีย)", q):
+        return ( "หลักสูตร **Design Thinking**\n"
+        "- คำอธิบาย: หลักสูตรนี้เน้นการพัฒนาทักษะการคิดเชิงออกแบบ (Design Thinking)"
+        "ซึ่งเป็นกระบวนการที่ช่วยให้ผู้เรียนสามารถแก้ไขปัญหาอย่างสร้างสรรค์และมีประสิทธิภาพ\n"
+        "- วัตถุประสงค์: เข้าใจกระบวนการ Design Thinking, สร้างต้นแบบ, ทำงานร่วมกันเชิงสร้างสรรค์\n"
+        "- ระยะเวลา: 1 day\n"
+        "- ราคา: ฝ่ายขาย\n"
+        "- วิทยากร: Songpathara Snidvongs (อ.จี้), นายจีรวัฒน์ เยาวนิช (อ.ต้น), นางสาวนฤมล ล้อมคง (อ.เฟิร์น)"
+        )
+    return None
 
-# -------------------- LLM (stream ตรง) --------------------
+tools = [recommend_courses]
+
+# -------------------- Memory+Agent Setup --------------------
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, streaming=True)
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+agent = initialize_agent(tools, llm, agent=AgentType.OPENAI_FUNCTIONS, memory=memory, verbose=False)
+
+# -------------------- LLM Context --------------------
 def build_context(question: str, k: int = 4) -> str:
-    docs = retriever.invoke(question)
-    return "\n\n".join(d.page_content for d in docs[:k])
+    docs = retriever_minddojo.invoke(question)
+    ctx = []
 
-SYSTEM_INSTRUCT = (
-    "คุณเป็นผู้ช่วยตอบคำถามสินค้า ให้ตอบเป็นภาษาไทย กระชับ ชัดเจน "
-    "ถ้าข้อมูลในบริบทไม่เพียงพอ ให้บอกว่าไม่พบข้อมูลที่เกี่ยวข้อง"
-)
+    for d in docs:
+        if d.metadata.get("type") == "course":
+            ctx.append(f"[COURSE DATA]\n{d.page_content}")
 
-# -------------------- API --------------------
+    return "\n\n".join(ctx[:k])
+
+SYSTEM_INSTRUCT = """คุณคือ AI ผู้ช่วยฝ่ายขายของบริษัท MindDoJo คุณต้องให้คำตอบกับฝ่ายขายเพื่อตอบสนองความต้องการของลูกค้าเกี่ยวกับคอร์สฝึกอบรมต่าง ๆ ของบริษัท โดยใช้ข้อมูลจากฐานข้อมูลที่มีอยู่เท่านั้น เพื่อให้ฝ่ายขายไปเสนอขายลูกค้าต่อ 
+
+### กฎสำคัญ: 
+# 1. คุณต้องใช้ข้อมูลจากฐานข้อมูล MindDoJo ที่ให้มาเท่านั้น - ฐานข้อมูลมี [COURSE DATA] - ห้ามใช้ความรู้ภายนอกหรือเดาข้อมูลเอง 
+# 2. หากข้อมูลที่ลูกค้าต้องการ **ไม่มีในฐานข้อมูล** ให้ตอบว่า: "ไม่พบข้อมูล กรุณาติดต่อฝ่ายพัฒนาเพิ่มเติม" 
+# 3. **ห้ามสร้างชื่อคอร์สใหม่** โดยอิงจาก description/objectives - ต้องใช้ "Course Title (EN)" ตรงจากฐานข้อมูลเท่านั้น 
+# 4. **ห้ามรวมคอร์สเข้าด้วยกัน** เช่น การสร้างคอร์สใหม่จากหลายคอร์ส 
+# 5. **ห้ามเพิ่มรายชื่อ Facilitator อื่นที่ไม่ได้อยู่ในคอร์สนั้น** 
+# 6. **ห้ามแปลชื่อคอร์ส (Course Title)** หรือ **ชื่อวิทยากร (Name, Nickname)** เป็นภาษาอื่น - ต้องใช้ตรงตามที่อยู่ในฐานข้อมูล 
+# 7. ถ้าเจอ document หลายอันที่คล้ายกัน ให้เลือกอันที่ตรงกับคำถามที่สุด 
+# 8. ส่วนข้อมูลอื่น เช่น **Description, Objectives, Expertise** สามารถอธิบายเป็นภาษาไทยได้ และสามารถอธิบายเพิ่มเติมได้ตามความเหมาะสม --- 
+# 9. ในส่วนของ Description และ Objectives ให้สรุปมาตอบ
+### วิธีการตอบ: 
+# 1. **ถามถึงคอร์ส (Course)** 
+    - แสดงข้อมูลดังนี้: 
+    - Course Title (EN): 
+    - Description (TH): 
+    - Objectives (TH): 
+    - Duration: 
+    - Price: 
+    - รายชื่อ Facilitators (ใช้ Name/Nickname ตรงจากฐานข้อมูล) 
+
+# 2. **ถามถึงปัญหา (Problem Scenario)** 
+    - วิเคราะห์ปัญหาจากคำถามของลูกค้า 
+    - อ่าน description และ objectives ของทุกคอร์สในฐานข้อมูล 
+    - เลือกคอร์สที่มีความเกี่ยวข้องกับปัญหาของคำถามมากที่สุด (สูงสุด 2 คอร์ส) 
+    - แสดงผลดังนี้: 
+    - Course Title (EN) 
+    - เหตุผลสั้น ๆ (TH) ว่าทำไมคอร์สนี้แก้ปัญหาที่เล่าได้ 
+
+--- 
+
+### ตัวอย่างการตอบ: 
+**Q:** "หลักสูตร Design Thinking มีอะไรบ้าง?" 
+**A:** หลักสูตร **Design Thinking** 
+    - คำอธิบาย: อ่านจาก Description ในฐานข้อมูล และอธิบายเพิ่มเติมตามความเหมาะสม 
+    - วัตถุประสงค์: เข้าใจกระบวนการ Design Thinking, สามารถสร้างต้นแบบ, ทำงานร่วมกันเชิงสร้างสรรค์ 
+    - ระยะเวลา: 1 day 
+    - ราคา: ติดต่อฝ่ายขาย 
+    - วิทยากร: ดร. สมชาย ใจดี, ชื่อเล่น
+***ถ้าหากมีวิทยากรมากกว่า1คนให้แสดงทั้งหมด*** 
+
+--- 
+
+**Q:** "คนในองค์กรมีความขัดแย้งกันบ่อย ควรทำอย่างไร?" 
+**A:** จากปัญหาที่เล่า แนะนำคอร์ส: 
+    - **Psychological Safety in Action** → เน้นสร้างบรรยากาศทีมที่ปลอดภัยในการแสดงความคิดเห็น ลดการทะเลาะและความขัดแย้ง 
+    - **Effective Communication** → ช่วยพัฒนาทักษะการฟังและการสื่อสาร ลดความเข้าใจผิดภายในทีม 
+
+"""
+
+# -------------------- FastAPI --------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 class ChatRequest(BaseModel):
+    session_id: str | None = None
     question: str
-    history: list[dict] = []  # [{sender: "user"|"bot", text: "..."}]
 
 @app.post("/chat-stream")
 async def chat_stream(req: ChatRequest):
-    """
-    ลำดับทำงาน:
-    1) ทางลัดไม่ใช้ LLM → ตอบทันที (ไหลทีละตัวอักษรเพื่อ UX)
-    2) ถ้าจำเป็นต้องใช้ LLM → stream โทเคนตรงจาก OpenAI
-    """
+    if not req.session_id:
+        req.session_id = str(uuid.uuid4())
+
+    past_chat = chat_collection.find_one({"session_id": req.session_id})
+    history_msgs = past_chat.get("messages", []) if past_chat else []
+
     async def gen():
         q = req.question.strip()
-
-        # 1) ลองตอบทางลัดก่อนเพื่อลด latency
-        for fast_fn in (price_products_fast, list_products_fast):
-            fast_ans = fast_fn(q)
-            if fast_ans:  # พบคำตอบแล้ว → สตรีมทีละตัวอักษรทันที
-                for ch in fast_ans:
-                    yield ch
-                    await asyncio.sleep(0)  # ปล่อย event loop
-                return
-
-        # 2) ใช้ LLM + RAG แบบ stream จริง
+        # ---TOOLS---
+        tool_answer = recommend_courses(q)
+        if tool_answer:
+            for ch in tool_answer:
+                yield ch
+                await asyncio.sleep(0.01)
+            _save_chat(req.session_id, q, tool_answer)
+            return
+        
+        # --- RAG context ---
         ctx = build_context(q)
-        prompt = (
-            f"{SYSTEM_INSTRUCT}\n\n"
-            f"ประวัติบทสนทนา (ถ้ามี):\n" +
-            "\n".join(f"{'ผู้ใช้' if m.get('sender')=='user' else 'บอท'}: {m.get('text','')}"
-                      for m in req.history) +
-            f"\n\nบริบทที่ค้นเจอ:\n{ctx}\n\nคำถาม:\n{q}\n\nคำตอบ:"
+        history_text = "\n".join(
+            f"ผู้ใช้: {m['text']}" if m['sender'] == "user" else f"AI: {m['text']}"
+            for m in history_msgs
         )
 
-        # handler ใหม่ต่อคำขอ (ห้ามใช้ตัวเดียวทั้งแอป)
+        prompt = [
+            SystemMessage(content=SYSTEM_INSTRUCT),
+            HumanMessage(
+                content=(
+                    f"ประวัติการสนทนา:\n{history_text}\n\n"
+                    f"ข้อมูลจากฐานข้อมูล:\n{ctx}\n\n"
+                    f"คำถาม:\n{q}\n\nคำตอบ:"
+                )
+            ),
+        ]
+
         handler = AsyncIteratorCallbackHandler()
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, streaming=True)
-
-        # สั่งให้ LLM เริ่มตอบใน background แล้วเรารอรับโทเคนจาก handler
         task = asyncio.create_task(llm.ainvoke(prompt, config={"callbacks": [handler]}))
 
+        final_answer = ""
         async for token in handler.aiter():
-            # token เป็นสตริงทีละชิ้น (ไม่บัฟเฟอร์ก้อนใหญ่)
+            final_answer += token
             yield token
+            await asyncio.sleep(0.01)
+        await task
 
-        await task  # รอให้เรียบร้อยก่อนจบสตรีม
+        _save_chat(req.session_id, q, final_answer)
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 
-# (Optional) endpoint sync เดิม เผื่ออยากเก็บไว้
-class ChatResponse(BaseModel):
-    response: str
+# -------------------- ฟังก์ชันช่วยเก็บประวัติ --------------------
+def _save_chat(session_id: str, user_text: str, ai_text: str):
+    """เก็บประวัติการสนทนาใน MongoDB"""
+    chat_collection.update_one(
+        {"session_id": session_id},
+        {"$push": 
+            {"messages": 
+                {"$each":[
+                    {"sender": "user", "text": user_text, "timestamp": datetime.utcnow()},
 
-@app.post("/chat", response_model=ChatResponse)
-def chat_sync(req: ChatRequest):
-    ans = price_products_fast(req.question) or list_products_fast(req.question)
-    if not ans:
-        ctx = build_context(req.question)
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
-        prompt = f"{SYSTEM_INSTRUCT}\n\nบริบท:\n{ctx}\n\nคำถาม:\n{req.question}\n\nคำตอบ:"
-        ans = llm.invoke(prompt).content
-    return {"response": ans}
+                    {"sender": "ai", "text": ai_text, "timestamp": datetime.utcnow()},
+                    ]
+                }
+            }
+        },
+        upsert=True,
+    )
+    
+# -------------------- Endpoint ดึงประวัติ --------------------
+@app.get("/history/{session_id}")
+def get_history(session_id: str):
+    doc = chat_collection.find_one({"session_id": session_id})
+    return doc or {"session_id": session_id, "messages": []}
 
+# -------------------- Run --------------------
 if __name__ == "__main__":
     import uvicorn
-    # tip: workers=1 สำหรับ dev streaming จะง่ายที่สุด
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-#1234sdfdsfwegregertertkoertoekt
+# ...existing code...
