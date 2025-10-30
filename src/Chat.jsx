@@ -1,3 +1,4 @@
+import './styles/chat.css';
 import React, { useEffect, useRef, useState, useMemo } from "react";
 
 /** ===== Endpoints: ใช้สตรีมก่อน ถ้าไม่ได้ค่อย fallback ไป /chat ===== */
@@ -19,7 +20,11 @@ function renderRich(src = "") {
   // 3) แยกเป็นบรรทัดและรวมลิสต์ให้เป็นก้อนเดียว
   const lines = s.split(/\r?\n/);
   const chunks = []; // เก็บเป็นสลับระหว่าง <ul>/<ol>/string
+<<<<<<< HEAD
   let list = null;   // {type:'ul'|'ol', items:[]}
+=======
+  let list = null;   // เก็บสถานะลิสต์ปัจจุบัน 
+>>>>>>> backend
 
   const flushList = () => {
     if (!list) return;
@@ -28,7 +33,11 @@ function renderRich(src = "") {
     list = null;
   };
 
+<<<<<<< HEAD
   for (const raw of lines) {
+=======
+  for (const raw of lines) { // ตัดบรรทัดว่าง
+>>>>>>> backend
     const line = raw.replace(/\s+$/g, "");
 
     if (/^\s*$/.test(line)) {
@@ -79,7 +88,12 @@ function renderRich(src = "") {
       buf.push(ch);
     } else {
       pushParagraph();
+<<<<<<< HEAD
       if (typeof ch === "string" && /^<\/*(ul|ol)/.test(ch)) htmlParts.push(ch);
+=======
+      if (typeof ch === "string" && /^<\/*(ul|ol)/.test(ch)) 
+        htmlParts.push(ch);
+>>>>>>> backend
     }
   }
   pushParagraph();
@@ -92,18 +106,37 @@ export default function Chat() {
   const DARK_BG  = "linear-gradient(to bottom, #111, #1a1a1a)";
 
   const initialMessages = useMemo(
+<<<<<<< HEAD
     () => [{ sender: "bot", text: "สวัสดีครับ สนใจสอบถามเกี่ยวกับ MindDoJo ไหมครับ?" }],
+=======
+    () => [{ sender: "bot", text: "สวัสดีค่ะ! มีอะไรให้ช่วยสำหรับวันนี้คะ?" }],
+>>>>>>> backend
     []
   );
-
+ // state: รายการห้องแชทและข้อความ
   const [chats, setChats] = useState([{ id: 1, name: "แชท #1", messages: initialMessages }]);
   const [currentChatId, setCurrentChatId] = useState(1);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const endRef = useRef(null);
 
+  // textarea ref เพื่อทำ auto-resize และรีเซ็ตความสูงเวลาเคลียร์
+  const taRef = useRef(null);
+
   // เก็บ AbortController ของคำขอล่าสุด ไว้ยกเลิกถ้าผู้ใช้สลับแชท/ออกหน้า
   const inflightController = useRef(null);
+
+  // ปรับความสูงเริ่มต้น/เมื่อค่า input เปลี่ยน
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    if (!input) {
+      ta.style.height = "42px"; // match CSS .input min-height
+    } else {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 240) + "px";
+    }
+  }, [input]);
 
   const currentChat = chats.find(c => c.id === currentChatId);
   const short = (s, n = 28) => (s.length > n ? s.slice(0, n) + "…" : s);
@@ -114,19 +147,19 @@ export default function Chat() {
 
   useEffect(() => {
     return () => inflightController.current?.abort(); // cleanup ตอน unmount
-  }, []);
-
+  }, []); 
+//สร้างแชทใหม่
   const handleNewChat = () => {
     const newId = chats.length ? Math.max(...chats.map(c => c.id)) + 1 : 1;
-    setChats([...chats, { id: newId, name: `แชท #${newId}`, messages: initialMessages }]);
+    setChats([...chats, { id: newId, name: `แชท #${newId}`, messages: initialMessages }]); // เพิ่มรายการห้อง
     setCurrentChatId(newId);
     setInput("");
   };
 
-  const handleSelectChat = (id) => {
+  const handleSelectChat = (id) => { //เมื่อสลับไปแชทอื่น
     setCurrentChatId(id);
     setInput("");
-    inflightController.current?.abort(); // ถ้ากำลังสตรีมอยู่ ให้ยกเลิกเพื่อไม่ให้ปนกัน
+    inflightController.current?.abort(); 
   };
 
   /** อ่านสตรีมทีละ chunk ถ้าไม่สำเร็จ → fallback ไป oneshot */
@@ -142,7 +175,11 @@ export default function Chat() {
 
     setChats(prev =>
       prev.map(c => {
+<<<<<<< HEAD
         if (c.id !== localChatId) return c;
+=======
+        if (c.id !== localChatId) return c; // อัปเดตเฉพาะแชทปัจจุบัน
+>>>>>>> backend
         const nextMsgs = [...c.messages, { sender: "user", text }, { sender: "bot", text: "" }];
         const userCount = nextMsgs.filter(m => m.sender === "user").length;
         const newName = (c.name.startsWith("แชท #") && userCount === 1) ? short(text) : c.name;
@@ -160,7 +197,11 @@ export default function Chat() {
     const appendToLastBot = (chunk) => {
       setChats(prev =>
         prev.map(c => {
+<<<<<<< HEAD
           if (c.id !== localChatId) return c;
+=======
+          if (c.id !== localChatId) return c; // อัปเดตเฉพาะแชทปัจจุบัน
+>>>>>>> backend
           const msgs = c.messages.slice();
           const last = msgs[msgs.length - 1];
           if (last?.sender === "bot") {
@@ -188,7 +229,7 @@ export default function Chat() {
       let done = false;
 
       while (!done) {
-        const { value, done: d } = await reader.read();
+        const { value, done: d } = await reader.read(); // อ่านทีละ chunk
         done = d;
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
@@ -229,7 +270,7 @@ export default function Chat() {
 
   return (
     <div className="root" style={{ background: DARK_BG }}>
-      <style>{css}</style>
+      {/* css ถูกนำเข้าเป็นไฟล์แล้ว: import './styles/chat.css'; */}
 
       {/* Sidebar */}
       <aside className="sidebar">
@@ -279,21 +320,35 @@ export default function Chat() {
         </section>
 
         <form className="composer" onSubmit={(e) => { e.preventDefault(); sendMessage(); }}>
-          <input
+          <textarea
+            ref={taRef}
             className="input"
             value={input}
+            placeholder="พิมพ์คำถาม… "
+            rows={1}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="พิมพ์คำถาม…"
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+            onInput={(e) => {
+              const ta = e.target;
+              ta.style.height = "auto";
+              ta.style.height = Math.min(ta.scrollHeight, 240) + "px";
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage(); // Enter = ส่ง
+              }
+              // Shift+Enter ให้เป็น newline (อย่า preventDefault)
+            }}
             disabled={loading}
           />
-          <button type="submit" className="btn btn-gold" disabled={loading || !input.trim()}>
-            ส่ง
-          </button>
-        </form>
+           <button type="submit" className="btn btn-gold" disabled={loading || !input.trim()}>
+             ส่ง
+           </button>
+         </form>
       </main>
     </div>
   );
+<<<<<<< HEAD
 }
 
 /* ---------- CSS: Gold/Black + bubble-fit + เน้นหัวข้อสำคัญ ---------- */
@@ -464,3 +519,6 @@ body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, In
 /* Reduce motion */
 @media (prefers-reduced-motion: reduce){ .btn, .bubble, .chat-tab, .footer-logo{ transition:none !important; } }
 `;
+=======
+}
+>>>>>>> backend
